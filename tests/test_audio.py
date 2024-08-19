@@ -6,7 +6,7 @@ import torchaudio
 import matplotlib.pyplot as plt
 
 from ariacl.config import load_config
-from ariacl.data import AudioTransform
+from ariacl.audio import AudioTransform
 
 CONFIG = load_config()
 SAMPLE_RATE = CONFIG["audio"]["sample_rate"]
