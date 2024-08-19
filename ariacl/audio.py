@@ -14,8 +14,8 @@ def get_wav_segments(
 ):
     assert os.path.isfile(audio_path), "Audio file not found"
     config = load_config()
-    sample_rate = config["sample_rate"]
-    chunk_len = config["chunk_len"]
+    sample_rate = config["audio"]["sample_rate"]
+    chunk_len = config["audio"]["chunk_len"]
 
     stream = torchaudio.io.StreamReader(audio_path)
     chunk_samples = int(sample_rate * chunk_len)
@@ -34,7 +34,7 @@ def get_wav_segments(
 
         # Pad seg_chunk if required
         if seg_chunk.shape[0] < stride_samples:
-            seg_chunk = F.pad(
+            seg_chunk = torch.nn.functional.pad(
                 seg_chunk,
                 (0, stride_samples - seg_chunk.shape[0]),
                 mode="constant",
