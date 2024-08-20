@@ -7,19 +7,19 @@ import torch
 
 from multiprocessing import Queue, Lock, Process
 from queue import Empty
+from typing import List
 
-from ariacl.audio import get_wav_segments
+from ariacl.audio import get_wav_segments, get_audio_intervals
+from ariacl.config import load_config
 
 
 # TODO: Add librosa silence tagging on this
 def supervised_worker(
     load_path_queue: Queue, save_file_lock, save_path: str, label: int
 ):
-
+    config = load_config()
     num_files_processed = 0
-    label_bytes = orjson.dumps(label)
-    label_str = base64.b64encode(label_bytes).decode("utf-8")
-
+    label_str = base64.b64encode(orjson.dumps(0)).decode("utf-8")
     while True:
         try:
             load_path = load_path_queue.get_nowait()
@@ -29,7 +29,7 @@ def supervised_worker(
 
         for wav in get_wav_segments(
             audio_path=load_path,
-            stride_factor=1,  ## CHANGE
+            stride_factor=config["data"]["stride_factor"],
         ):
             wav_buffer = io.BytesIO()
             torch.save(wav, wav_buffer)
@@ -49,8 +49,79 @@ def supervised_worker(
             print(f"Worker {os.getpid()} has finished {num_files_processed}")
 
 
-class TrainingDataset(torch.utils.data.Dataset):
+# TODO: Recordings with lots of background noise are incorrectly tagged
+def source_separated_worker(
+    load_path_queue: Queue, save_file_lock, save_path: str
+):
+    config = load_config()
+    stride_factor = config["data"]["stride_factor"]
+    piano_label = base64.b64encode(orjson.dumps(1)).decode("utf-8")
+    non_piano_label = base64.b64encode(orjson.dumps(0)).decode("utf-8")
+    num_files_processed = 0
 
+    while True:
+        try:
+            load_path = load_path_queue.get_nowait()
+        except Empty:
+            print(f"Worker {os.getpid()} finished")
+            return
+
+        for piano_wav, other_wav in zip(
+            get_wav_segments(
+                audio_path=load_path["piano"],
+                stride_factor=stride_factor,
+            ),
+            get_wav_segments(
+                audio_path=load_path["other"],
+                stride_factor=stride_factor,
+            ),
+        ):
+            silent_intervals = get_audio_intervals(
+                wav=piano_wav,
+                min_window_s=config["data"]["piano_detection"][
+                    "min_window_silence_s"
+                ],
+                threshold_db=config["data"]["piano_detection"][
+                    "silence_threshold_db"
+                ],
+                detect_silent_intervals=True,
+            )
+            non_piano_intervals = get_audio_intervals(
+                wav=other_wav,
+                min_window_s=config["data"]["piano_detection"][
+                    "min_window_other_s"
+                ],
+                threshold_db=config["data"]["piano_detection"][
+                    "noise_threshold_db"
+                ],
+                detect_silent_intervals=False,
+            )
+
+            _label = (
+                non_piano_label
+                if non_piano_intervals or silent_intervals
+                else piano_label
+            )
+
+            wav_buffer = io.BytesIO()
+            torch.save(piano_wav + other_wav, wav_buffer)
+            wav_buffer.seek(0)
+            wav_bytes = wav_buffer.read()
+            wav_str = base64.b64encode(wav_bytes).decode("utf-8")
+
+            with save_file_lock:
+                with open(save_path, mode="a") as f:
+                    f.write(wav_str)
+                    f.write("\n")
+                    f.write(_label)
+                    f.write("\n")
+
+        num_files_processed += 1
+        if num_files_processed % 25 == 0:
+            print(f"Worker {os.getpid()} has finished {num_files_processed}")
+
+
+class TrainingDataset(torch.utils.data.Dataset):
     def __init__(self, load_paths: str | list):
         super().__init__()
 
@@ -91,7 +162,9 @@ class TrainingDataset(torch.utils.data.Dataset):
         mmap_obj.seek(pos)
 
         # Load data from line
-        wav = torch.load(io.BytesIO(base64.b64decode(mmap_obj.readline())))
+        wav = torch.load(
+            io.BytesIO(base64.b64decode(mmap_obj.readline())), weights_only=True
+        )
         label = orjson.loads(base64.b64decode(mmap_obj.readline()))
 
         return wav, torch.tensor(label, dtype=torch.float32)
@@ -115,8 +188,13 @@ class TrainingDataset(torch.utils.data.Dataset):
             return [int(line.strip()) for line in file]
 
     @staticmethod
-    def _get_index_path(load_path: str):
-        return f"{load_path}_index"
+    def _get_index_path(load_path: str) -> str:
+        parts = load_path.rsplit(".", 1)
+        if len(parts) == 1:
+            return f"{load_path}_index"
+        else:
+            base, ext = parts
+            return f"{base}_index.{ext}"
 
     def _build_index(self, mmap_obj):
         mmap_obj.seek(0)
@@ -154,7 +232,7 @@ class TrainingDataset(torch.utils.data.Dataset):
         index_path = TrainingDataset._get_index_path(load_path=save_path)
         if os.path.isfile(index_path):
             print(f"Removing existing index file at {index_path}")
-            os.remove(TrainingDataset._get_index_path(load_path=save_path))
+            os.remove(index_path)
 
         load_path_queue = Queue()
         for entry in load_paths:
@@ -166,6 +244,44 @@ class TrainingDataset(torch.utils.data.Dataset):
             p = Process(
                 target=supervised_worker,
                 args=(load_path_queue, save_file_lock, save_path, label),
+            )
+            processes.append(p)
+            p.start()
+
+        # Wait for all processes to complete
+        for p in processes:
+            p.join()
+
+        # Create index by loading object
+        return TrainingDataset(load_paths=save_path)
+
+    @classmethod
+    def build_source_separated(
+        cls,
+        load_paths: List[dict],
+        save_path: str,
+        num_processes: int = 1,
+    ):
+        assert os.path.isfile(save_path) is False, f"{save_path} already exists"
+        assert (
+            len(save_path.rsplit(".", 1)) == 2
+        ), "path is missing a file extension"
+
+        index_path = TrainingDataset._get_index_path(load_path=save_path)
+        if os.path.isfile(index_path):
+            print(f"Removing existing index file at {index_path}")
+            os.remove(index_path)
+
+        load_path_queue = Queue()
+        for entry in load_paths:
+            load_path_queue.put(entry)
+
+        processes = []
+        save_file_lock = Lock()
+        for _ in range(num_processes):
+            p = Process(
+                target=source_separated_worker,
+                args=(load_path_queue, save_file_lock, save_path),
             )
             processes.append(p)
             p.start()

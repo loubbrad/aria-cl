@@ -6,7 +6,11 @@ import torchaudio
 import matplotlib.pyplot as plt
 
 from ariacl.config import load_config
-from ariacl.audio import AudioTransform
+from ariacl.audio import (
+    AudioTransform,
+    get_audio_intervals,
+    get_wav_segments,
+)
 
 CONFIG = load_config()
 SAMPLE_RATE = CONFIG["audio"]["sample_rate"]
@@ -38,7 +42,7 @@ class TestSpec(unittest.TestCase):
 
     def test_spec(self):
         audio_transform = AudioTransform()
-        wav, sr = torchaudio.load("./tests/test_data/piano.mp3")
+        wav, sr = torchaudio.load("./tests/test_data/concerto_piano.mp3")
         wav = torchaudio.functional.resample(wav, sr, SAMPLE_RATE).mean(
             0, keepdim=True
         )[:, self.start : self.start + SAMPLE_RATE * CHUNK_LEN]
@@ -48,13 +52,28 @@ class TestSpec(unittest.TestCase):
 
     def test_aug(self):
         audio_transform = AudioTransform()
-        wav, sr = torchaudio.load("./tests/test_data/piano.mp3")
+        wav, sr = torchaudio.load("./tests/test_data/concerto_piano.mp3")
         wav = torchaudio.functional.resample(wav, sr, SAMPLE_RATE).mean(
             0, keepdim=True
         )[:, self.start : self.start + SAMPLE_RATE * CHUNK_LEN]
 
         mel = audio_transform.forward(wav=wav)
         plot_spec(mel=mel[0], name="aug")
+
+
+class TestDetection(unittest.TestCase):
+    def test_spec(self):
+        for idx, wav in enumerate(
+            get_wav_segments(
+                audio_path="./tests/test_data/concerto_piano.mp3",
+                stride_factor=1,
+            )
+        ):
+            print(
+                get_audio_intervals(
+                    wav, min_window_s=1.0, detect_silent_intervals=True
+                )
+            )
 
 
 if __name__ == "__main__":

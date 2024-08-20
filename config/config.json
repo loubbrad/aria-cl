@@ -17,5 +17,16 @@
         "max_distortion_gain": 25,
         "pitch_shift_ratio": 0.2,
         "max_pitch_shift": 4
+    },
+    "data": {
+        "piano_detection": {
+            "frame_len": 2048,
+            "hop_len": 512,
+            "silence_threshold_db": -50,
+            "noise_threshold_db": -110,
+            "min_window_silence_s": 4.0,
+            "min_window_other_s": 1.5
+        },
+        "stride_factor": 2
     }
 }

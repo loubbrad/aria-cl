@@ -1,8 +1,11 @@
 import os
 import random
+import numpy as np
 import torch
 import torchaudio
 import torchaudio.functional as F
+
+from librosa.effects import _signal_to_frame_nonsilent
 
 from ariacl.config import load_config
 
@@ -48,6 +51,52 @@ def get_wav_segments(
 
         if buffer.shape[0] == chunk_samples:
             yield buffer
+
+
+def get_audio_intervals(
+    wav: torch.Tensor,
+    min_window_s: float,
+    threshold_db: int,
+    detect_silent_intervals: bool = False,
+):
+    config = load_config()
+    sample_rate = config["audio"]["sample_rate"]
+    frame_len = config["data"]["piano_detection"]["frame_len"]
+    hop_len = config["data"]["piano_detection"]["hop_len"]
+    min_window_steps = (sample_rate // hop_len) * min_window_s + 1
+    ms_per_hop = int((hop_len * 1e3) / sample_rate)
+
+    non_silent = _signal_to_frame_nonsilent(
+        wav.numpy(),
+        frame_length=frame_len,
+        hop_length=hop_len,
+        top_db=100,
+        ref=threshold_db,
+    )
+
+    # Invert the array if detecting silence
+    if detect_silent_intervals:
+        non_silent = np.logical_not(non_silent)
+
+    # Add padding at the start and end
+    padded = np.concatenate(([False], non_silent, [False]))
+
+    edges = np.diff(padded.astype(int))
+    starts = np.where(edges == 1)[0]
+    ends = np.where(edges == -1)[0]
+
+    # Calculate lengths
+    lengths = ends - starts
+
+    # Filter intervals by minimum length
+    valid = lengths > min_window_steps
+    intervals = [
+        (int(start * ms_per_hop), int((end - 1) * ms_per_hop))
+        for start, end, vl in zip(starts, ends, valid)
+        if vl
+    ]
+
+    return intervals
 
 
 class AudioTransform(torch.nn.Module):
