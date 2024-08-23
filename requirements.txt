@@ -1,4 +1,4 @@
 torch
 torchaudio
-librosa
 orjson
+accelerate
