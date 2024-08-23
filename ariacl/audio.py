@@ -5,7 +5,7 @@ import torch
 import torchaudio
 import torchaudio.functional as F
 
-from librosa.effects import _signal_to_frame_nonsilent
+from typing import Union, Callable, Optional
 
 from ariacl.config import load_config
 
@@ -13,7 +13,6 @@ from ariacl.config import load_config
 def get_wav_segments(
     audio_path: str,
     stride_factor: int,
-    cut_regions: list | None = None,
 ):
     assert os.path.isfile(audio_path), "Audio file not found"
     config = load_config()
@@ -53,12 +52,98 @@ def get_wav_segments(
             yield buffer
 
 
+@torch.no_grad()
+def get_wav_segments_b(
+    audio_path: str,
+    stride_factor: int,
+    device: str = "cuda",
+):
+    assert os.path.isfile(audio_path), "Audio file not found"
+    config = load_config()
+    sample_rate = config["audio"]["sample_rate"]
+    chunk_len = config["audio"]["chunk_len"]
+    chunk_samples = int(sample_rate * chunk_len)
+    stride_samples = int(chunk_samples // stride_factor)
+    assert chunk_samples % stride_samples == 0, "Invalid stride"
+
+    wav, orig_sample_rate = torchaudio.load(audio_path)
+    if orig_sample_rate != sample_rate:
+        wav = torchaudio.functional.resample(
+            waveform=wav, orig_freq=orig_sample_rate, new_freq=sample_rate
+        ).to(device)
+    else:
+        wav = wav.to(device)
+
+    if wav.shape[0] > 1:
+        wav = wav.mean(dim=0)
+    else:
+        wav = wav.squeeze(0)
+
+    return wav.unfold(0, chunk_samples, stride_samples)
+
+
+def _amplitude_to_db(
+    S: torch.Tensor,
+    ref: Union[float, Callable] = 1.0,
+    amin: float = 1e-5,
+    top_db: Optional[float] = 80.0,
+):
+    magnitude = torch.abs(S)
+    amin = torch.tensor(amin, device=magnitude.device, dtype=magnitude.dtype)
+
+    if callable(ref):
+        ref_value = ref(magnitude)
+    else:
+        ref_value = torch.tensor(ref)
+
+    log_spec = 20.0 * torch.log10(torch.maximum(amin, magnitude))
+    log_spec -= 20.0 * torch.log10(torch.maximum(amin, ref_value))
+
+    if top_db is not None:
+        log_spec = torch.maximum(log_spec, log_spec.max() - top_db)
+
+    return log_spec
+
+
+def signal_to_frame_nonsilent(
+    y: torch.Tensor,
+    frame_length: int = 2048,
+    hop_length: int = 512,
+    top_db: float = 60.0,
+    silence_threshold: float = -20.0,
+    ref: Union[float, Callable] = torch.max,
+    aggregate: Callable = torch.max,
+):
+    """Note that silence_threshold in in units of dBFS."""
+    # Ensure there is a batch_dim
+    if y.dim() == 1:
+        y = y.unsqueeze(0)
+
+    spec = torchaudio.transforms.Spectrogram(
+        n_fft=frame_length,
+        hop_length=hop_length,
+        power=2,
+        center=True,
+    ).to(y.device)(y)
+    rms = torch.sqrt(spec.mean(dim=1))
+    db = _amplitude_to_db(rms, ref=ref, top_db=None)
+
+    if db.dim() > 2:
+        db = aggregate(db, dim=1)
+    if top_db is not None:
+        db = torch.max(db, db.max() - top_db)
+
+    return db > silence_threshold
+
+
 def get_audio_intervals(
     wav: torch.Tensor,
     min_window_s: float,
     threshold_db: int,
     detect_silent_intervals: bool = False,
 ):
+    """Note that threshold_db is in units of dBFS"""
+
     config = load_config()
     sample_rate = config["audio"]["sample_rate"]
     frame_len = config["data"]["piano_detection"]["frame_len"]
@@ -66,37 +151,40 @@ def get_audio_intervals(
     min_window_steps = (sample_rate // hop_len) * min_window_s + 1
     ms_per_hop = int((hop_len * 1e3) / sample_rate)
 
-    non_silent = _signal_to_frame_nonsilent(
-        wav.numpy(),
+    non_silent = signal_to_frame_nonsilent(
+        wav,
         frame_length=frame_len,
         hop_length=hop_len,
-        top_db=100,
-        ref=threshold_db,
+        silence_threshold=threshold_db,
+        ref=1.0,
     )
 
-    # Invert the array if detecting silence
-    if detect_silent_intervals:
-        non_silent = np.logical_not(non_silent)
+    if detect_silent_intervals is True:
+        non_silent = ~non_silent
 
-    # Add padding at the start and end
-    padded = np.concatenate(([False], non_silent, [False]))
+    batch_intervals = []
+    for non_silent_item in non_silent:
+        padded = torch.cat(
+            [
+                torch.tensor([False], device=wav.device),
+                non_silent_item,
+                torch.tensor([False], device=wav.device),
+            ]
+        )
+        edges = torch.diff(padded.int())
+        starts = torch.where(edges == 1)[0]
+        ends = torch.where(edges == -1)[0]
+        lengths = ends - starts
+        valid = lengths > min_window_steps
 
-    edges = np.diff(padded.astype(int))
-    starts = np.where(edges == 1)[0]
-    ends = np.where(edges == -1)[0]
+        intervals = [
+            (int(start.item() * ms_per_hop), int((end.item() - 1) * ms_per_hop))
+            for start, end, vl in zip(starts, ends, valid)
+            if vl.item()
+        ]
+        batch_intervals.append(intervals)
 
-    # Calculate lengths
-    lengths = ends - starts
-
-    # Filter intervals by minimum length
-    valid = lengths > min_window_steps
-    intervals = [
-        (int(start * ms_per_hop), int((end - 1) * ms_per_hop))
-        for start, end, vl in zip(starts, ends, valid)
-        if vl
-    ]
-
-    return intervals
+    return batch_intervals
 
 
 class AudioTransform(torch.nn.Module):
@@ -295,14 +383,15 @@ class AudioTransform(torch.nn.Module):
 
         return shifted_specs
 
+    # TODO: Debug why noise is causing NaN loss
     def aug_wav(self, wav: torch.Tensor):
         # This function doesn't apply distortion. If distortion is desired it
         # should be run beforehand on the cpu with distortion_aug_cpu. Note
         # also that shifting is done to the spectrogram in log_mel, not the wav.
 
         # Noise
-        if random.random() < self.noise_ratio:
-            wav = self.apply_noise(wav)
+        # if random.random() < self.noise_ratio:
+        #     wav = self.apply_noise(wav)
 
         # Reverb
         if random.random() < self.reverb_ratio:

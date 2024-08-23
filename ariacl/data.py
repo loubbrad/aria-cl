@@ -1,5 +1,6 @@
 import mmap
 import os
+import gc
 import io
 import base64
 import orjson
@@ -9,105 +10,95 @@ from multiprocessing import Queue, Lock, Process
 from queue import Empty
 from typing import List
 
-from ariacl.audio import get_wav_segments, get_audio_intervals
+from ariacl.audio import get_wav_segments_b, get_audio_intervals
 from ariacl.config import load_config
 
 
-# TODO: Add librosa silence tagging on this
+def _get_supervised_batches_and_intervals(
+    piano_path: str, config: dict, device: str
+):
+    piano_wav_batch = get_wav_segments_b(
+        audio_path=piano_path,
+        stride_factor=config["data"]["stride_factor"],
+        device=device,
+    )
+    silent_intervals_batch = get_audio_intervals(
+        wav=piano_wav_batch,
+        min_window_s=config["data"]["piano_detection"]["min_window_silence_s"],
+        threshold_db=config["data"]["piano_detection"]["silence_threshold_db"],
+        detect_silent_intervals=True,
+    )
+
+    return piano_wav_batch, silent_intervals_batch
+
+
+# TODO: Debug why this is slowing down overtime (torch.save issue?)
 def supervised_worker(
-    load_path_queue: Queue, save_file_lock, save_path: str, label: int
+    load_path_queue: Queue,
+    save_file_lock,
+    save_path: str,
+    label: int,
+    device="cuda",
 ):
     config = load_config()
     num_files_processed = 0
-    label_str = base64.b64encode(orjson.dumps(0)).decode("utf-8")
-    while True:
-        try:
-            load_path = load_path_queue.get_nowait()
-        except Empty:
-            print(f"Worker {os.getpid()} finished")
-            return
-
-        for wav in get_wav_segments(
-            audio_path=load_path,
-            stride_factor=config["data"]["stride_factor"],
-        ):
-            wav_buffer = io.BytesIO()
-            torch.save(wav, wav_buffer)
-            wav_buffer.seek(0)
-            wav_bytes = wav_buffer.read()
-            wav_str = base64.b64encode(wav_bytes).decode("utf-8")
-
-            with save_file_lock:
-                with open(save_path, mode="a") as f:
-                    f.write(wav_str)
-                    f.write("\n")
-                    f.write(label_str)
-                    f.write("\n")
-
-        num_files_processed += 1
-        if num_files_processed % 25 == 0:
-            print(f"Worker {os.getpid()} has finished {num_files_processed}")
-
-
-# TODO: Recordings with lots of background noise are incorrectly tagged
-def source_separated_worker(
-    load_path_queue: Queue, save_file_lock, save_path: str
-):
-    config = load_config()
-    stride_factor = config["data"]["stride_factor"]
-    piano_label = base64.b64encode(orjson.dumps(1)).decode("utf-8")
+    label = base64.b64encode(orjson.dumps(label)).decode("utf-8")
     non_piano_label = base64.b64encode(orjson.dumps(0)).decode("utf-8")
-    num_files_processed = 0
+
+    if device == "cuda":
+        assert torch.cuda.is_available()
 
     while True:
         try:
-            load_path = load_path_queue.get_nowait()
+            load_path = load_path_queue.get(timeout=0.01)
         except Empty:
-            print(f"Worker {os.getpid()} finished")
-            return
+            if load_path_queue.empty():
+                print(f"Worker {os.getpid()} finished")
+                return
+            continue
 
-        for piano_wav, other_wav in zip(
-            get_wav_segments(
-                audio_path=load_path["piano"],
-                stride_factor=stride_factor,
-            ),
-            get_wav_segments(
-                audio_path=load_path["other"],
-                stride_factor=stride_factor,
-            ),
-        ):
-            silent_intervals = get_audio_intervals(
-                wav=piano_wav,
-                min_window_s=config["data"]["piano_detection"][
-                    "min_window_silence_s"
-                ],
-                threshold_db=config["data"]["piano_detection"][
-                    "silence_threshold_db"
-                ],
-                detect_silent_intervals=True,
-            )
-            non_piano_intervals = get_audio_intervals(
-                wav=other_wav,
-                min_window_s=config["data"]["piano_detection"][
-                    "min_window_other_s"
-                ],
-                threshold_db=config["data"]["piano_detection"][
-                    "noise_threshold_db"
-                ],
-                detect_silent_intervals=False,
-            )
+        try:
+            with torch.no_grad():
+                wav_batch, silent_intervals_batch = (
+                    _get_supervised_batches_and_intervals(
+                        piano_path=load_path,
+                        config=config,
+                        device=device,
+                    )
+                )
+        except torch.OutOfMemoryError as e:
+            print("Not enough CUDA memory, offloading to CPU")
+            torch.cuda.empty_cache()
+            gc.collect()
 
-            _label = (
-                non_piano_label
-                if non_piano_intervals or silent_intervals
-                else piano_label
-            )
+            try:
+                with torch.no_grad():
+                    wav_batch, silent_intervals_batch = (
+                        _get_supervised_batches_and_intervals(
+                            piano_path=load_path,
+                            config=config,
+                            device="cpu",
+                        )
+                    )
+            except Exception as e:
+                print(f"Failed to process {load_path}")
+                continue
+        except Exception as e:
+            print(f"Failed to process {load_path}")
+            torch.cuda.empty_cache()
+            gc.collect()
+            continue
 
-            wav_buffer = io.BytesIO()
-            torch.save(piano_wav + other_wav, wav_buffer)
-            wav_buffer.seek(0)
-            wav_bytes = wav_buffer.read()
-            wav_str = base64.b64encode(wav_bytes).decode("utf-8")
+        for idx, silent_intervals in enumerate(silent_intervals_batch):
+            _label = non_piano_label if silent_intervals else label
+
+            wav_to_save = wav_batch[idx].clone()
+
+            with io.BytesIO() as wav_buffer:
+                torch.save(wav_to_save.cpu(), wav_buffer)
+                wav_buffer.seek(0)
+                wav_bytes = wav_buffer.read()
+                wav_str = base64.b64encode(wav_bytes).decode("utf-8")
 
             with save_file_lock:
                 with open(save_path, mode="a") as f:
@@ -116,9 +107,148 @@ def source_separated_worker(
                     f.write(_label)
                     f.write("\n")
 
+        torch.cuda.empty_cache()
+        gc.collect()
+
         num_files_processed += 1
         if num_files_processed % 25 == 0:
-            print(f"Worker {os.getpid()} has finished {num_files_processed}")
+            print(
+                f"Worker {os.getpid()} has finished {num_files_processed} files, {load_path_queue.qsize()} remaining"
+            )
+
+
+def _get_source_separated_batches_and_intervals(
+    piano_path: str, other_path: str, config: dict, device: str
+):
+    piano_wav_batch = get_wav_segments_b(
+        audio_path=piano_path,
+        stride_factor=config["data"]["stride_factor"],
+        device=device,
+    )
+    other_wav_batch = get_wav_segments_b(
+        audio_path=other_path,
+        stride_factor=config["data"]["stride_factor"],
+        device=device,
+    )
+
+    if piano_wav_batch.shape[0] != other_wav_batch.shape[0]:
+        raise ValueError
+
+    silent_intervals_batch = get_audio_intervals(
+        wav=piano_wav_batch,
+        min_window_s=config["data"]["piano_detection"]["min_window_silence_s"],
+        threshold_db=config["data"]["piano_detection"]["silence_threshold_db"],
+        detect_silent_intervals=True,
+    )
+    non_piano_intervals_batch = get_audio_intervals(
+        wav=other_wav_batch,
+        min_window_s=config["data"]["piano_detection"]["min_window_other_s"],
+        threshold_db=config["data"]["piano_detection"]["noise_threshold_db"],
+        detect_silent_intervals=False,
+    )
+
+    return (
+        piano_wav_batch,
+        other_wav_batch,
+        silent_intervals_batch,
+        non_piano_intervals_batch,
+    )
+
+
+# TODO: Fix deadlock issue from using multiple workers
+def source_separated_worker(
+    load_path_queue: Queue, save_file_lock, save_path: str, device="cuda"
+):
+    config = load_config()
+    piano_label = base64.b64encode(orjson.dumps(1)).decode("utf-8")
+    non_piano_label = base64.b64encode(orjson.dumps(0)).decode("utf-8")
+    num_files_processed = 0
+
+    if device == "cuda":
+        assert torch.cuda.is_available()
+
+    while True:
+        try:
+            load_path = load_path_queue.get(timeout=0.01)
+        except Empty:
+            if load_path_queue.empty():
+                print(f"Worker {os.getpid()} finished")
+                return
+            continue
+
+        try:
+            with torch.no_grad():
+                (
+                    piano_wav_batch,
+                    other_wav_batch,
+                    silent_intervals_batch,
+                    non_piano_intervals_batch,
+                ) = _get_source_separated_batches_and_intervals(
+                    piano_path=load_path["piano"],
+                    other_path=load_path["other"],
+                    config=config,
+                    device=device,
+                )
+        except torch.OutOfMemoryError as e:
+            print("Not enough CUDA memory, offloading to CPU")
+            torch.cuda.empty_cache()
+            gc.collect()
+
+            try:
+                with torch.no_grad():
+                    (
+                        piano_wav_batch,
+                        other_wav_batch,
+                        silent_intervals_batch,
+                        non_piano_intervals_batch,
+                    ) = _get_source_separated_batches_and_intervals(
+                        piano_path=load_path["piano"],
+                        other_path=load_path["other"],
+                        config=config,
+                        device="cpu",
+                    )
+            except Exception as e:
+                print(f"Failed to process {load_path}")
+                continue
+        except Exception as e:
+            print(f"Failed to process {load_path}")
+            torch.cuda.empty_cache()
+            gc.collect()
+            continue
+
+        for idx, (silent_intervals, non_piano_intervals) in enumerate(
+            zip(silent_intervals_batch, non_piano_intervals_batch)
+        ):
+
+            _label = (
+                non_piano_label
+                if non_piano_intervals or silent_intervals
+                else piano_label
+            )
+
+            wav_to_save = piano_wav_batch[idx] + other_wav_batch[idx]
+
+            with io.BytesIO() as wav_buffer:
+                torch.save(wav_to_save.cpu(), wav_buffer)
+                wav_buffer.seek(0)
+                wav_bytes = wav_buffer.read()
+                wav_str = base64.b64encode(wav_bytes).decode("utf-8")
+
+            with save_file_lock:
+                with open(save_path, mode="a") as f:
+                    f.write(wav_str)
+                    f.write("\n")
+                    f.write(_label)
+                    f.write("\n")
+
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        num_files_processed += 1
+        if num_files_processed % 25 == 0:
+            print(
+                f"Worker {os.getpid()} has finished {num_files_processed} files, {load_path_queue.qsize()} remaining"
+            )
 
 
 class TrainingDataset(torch.utils.data.Dataset):
@@ -156,12 +286,10 @@ class TrainingDataset(torch.utils.data.Dataset):
         return len(self.index)
 
     def __getitem__(self, idx: int):
-        # Seek position
         file_id, pos = self.index[idx]
         mmap_obj = self.file_mmaps[file_id]
         mmap_obj.seek(pos)
 
-        # Load data from line
         wav = torch.load(
             io.BytesIO(base64.b64decode(mmap_obj.readline())), weights_only=True
         )
@@ -248,11 +376,10 @@ class TrainingDataset(torch.utils.data.Dataset):
             processes.append(p)
             p.start()
 
-        # Wait for all processes to complete
         for p in processes:
             p.join()
 
-        # Create index by loading object
+        # Implicitly creates index
         return TrainingDataset(load_paths=save_path)
 
     @classmethod
@@ -286,9 +413,8 @@ class TrainingDataset(torch.utils.data.Dataset):
             processes.append(p)
             p.start()
 
-        # Wait for all processes to complete
         for p in processes:
             p.join()
 
-        # Create index by loading object
+        # Implicitly creates index
         return TrainingDataset(load_paths=save_path)

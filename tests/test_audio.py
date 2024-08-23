@@ -1,6 +1,7 @@
 import unittest
 import logging
 import os
+import shutil
 import torch
 import torchaudio
 import matplotlib.pyplot as plt
@@ -17,6 +18,10 @@ SAMPLE_RATE = CONFIG["audio"]["sample_rate"]
 CHUNK_LEN = CONFIG["audio"]["chunk_len"]
 
 logging.basicConfig(level=logging.INFO)
+
+if os.path.isdir("tests/test_results") is True:
+    shutil.rmtree("tests/test_results")
+
 if os.path.isdir("tests/test_results") is False:
     os.mkdir("tests/test_results")
 
@@ -61,18 +66,70 @@ class TestSpec(unittest.TestCase):
         plot_spec(mel=mel[0], name="aug")
 
 
-class TestDetection(unittest.TestCase):
-    def test_spec(self):
+class TestAug(unittest.TestCase):
+    def test_aug(self):
+        audio_transform = AudioTransform()
+        config = load_config()
+
         for idx, wav in enumerate(
             get_wav_segments(
                 audio_path="./tests/test_data/concerto_piano.mp3",
                 stride_factor=1,
             )
         ):
+            aug_wav = audio_transform.aug_wav(wav.unsqueeze(0))
+            torchaudio.save(
+                f"tests/test_results/{idx}.wav",
+                aug_wav,
+                config["audio"]["sample_rate"],
+            )
+
+
+# TODO: Test this when gpu and cpu idle to see which is better (CPU or batched on CUDA)
+class TestDetection(unittest.TestCase):
+    def test_silence_detection(self):
+        for idx, wav in enumerate(
+            get_wav_segments(
+                audio_path="./tests/test_data/concerto_other.mp3",
+                stride_factor=1,
+            )
+        ):
             print(
                 get_audio_intervals(
-                    wav, min_window_s=1.0, detect_silent_intervals=True
+                    wav,
+                    min_window_s=1.0,
+                    threshold_db=-20,
+                    detect_silent_intervals=False,
                 )
+            )
+
+            if idx == 9:
+                break
+
+    def test_silence_detection_b(self):
+        config = load_config()
+        batch = torch.stack(
+            list(
+                get_wav_segments(
+                    audio_path="./tests/test_data/concerto_piano.mp3",
+                    stride_factor=1,
+                )
+            )[:100]
+        )
+
+        for idx, intervals in enumerate(
+            get_audio_intervals(
+                batch,
+                min_window_s=3.0,
+                threshold_db=-20,
+                detect_silent_intervals=True,
+            )
+        ):
+            f_name = f"{idx}_0.mp3" if intervals else f"{idx}_1.mp3"
+            torchaudio.save(
+                f"tests/test_results/" + f_name,
+                batch[idx].unsqueeze(0),
+                config["audio"]["sample_rate"],
             )
 
 
