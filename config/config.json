@@ -1,22 +1,22 @@
 {
     "audio": {
-        "sample_rate": 16000,
-        "n_fft": 1024,
-        "hop_len": 160,
+        "sample_rate": 22050,
+        "n_fft": 2048,
+        "hop_len": 220,
         "chunk_len": 5,
-        "n_mels": 128
+        "n_mels": 256
     },
     "aug": {
-        "noise_ratio": 0.15,
+        "noise_ratio": 0.1,
         "min_noise_snr": 20,
         "max_noise_snr": 50,
         "reverb_ratio": 0.1,
         "bandpass_ratio": 0.1,
-        "distortion_ratio": 0.15,
+        "distortion_ratio": 0.02,
         "min_distortion_gain": 0,
         "max_distortion_gain": 25,
         "pitch_shift_ratio": 0.25,
-        "max_pitch_shift": 4
+        "max_pitch_shift": 3
     },
     "data": {
         "piano_detection": {
@@ -25,10 +25,15 @@
             "silence_threshold_db": -20,
             "noise_threshold_db": -20,
             "min_window_silence_s": 4.0,
-            "min_window_other_s": 1.5
+            "min_window_other_s": 1.0
         },
         "stride_factor": 2
     },
     "inference": {
+        "batch_size": 512,
+        "threshold_score": 0.5,
+        "min_avg_score": 0.5,
+        "min_valid_window_s": 45,
+        "min_invalid_window_s": 10
     }
 }

@@ -1,8 +1,15 @@
 import argparse
 import os
 import glob
+import json
+
 from typing import List
+from safetensors import safe_open
+
 from ariacl.data import TrainingDataset
+from ariacl.config import load_model_config
+from ariacl.model import MelSpectrogramCNN, ModelConfig
+from ariacl.inference import process_files
 
 
 def _add_supervised_args(parser):
@@ -60,7 +67,34 @@ def _add_source_separated_args(parser):
     )
 
 
-def check_save_path(save_path: str):
+def _add_process_files_args(parser):
+    parser.add_argument(
+        "--load_dir",
+        type=str,
+        required=True,
+        help="Directory to load audio files from",
+    )
+    parser.add_argument(
+        "--save_path",
+        type=str,
+        required=True,
+        help="Path to save the results JSON file",
+    )
+    parser.add_argument(
+        "--checkpoint_path",
+        type=str,
+        required=True,
+        help="Path to the model checkpoint file",
+    )
+    parser.add_argument(
+        "--model_config",
+        type=str,
+        default="small",
+        help="Model configuration to use (default: small)",
+    )
+
+
+def _check_save_path(save_path: str):
     assert not os.path.exists(
         save_path
     ), f"Save path {save_path} already exists"
@@ -75,7 +109,7 @@ def check_save_path(save_path: str):
 
 
 def build_supervised(args):
-    check_save_path(args.save_path)
+    _check_save_path(args.save_path)
     assert os.path.isdir(
         args.load_dir
     ), f"Load directory {args.load_dir} does not exist"
@@ -117,7 +151,7 @@ def build_supervised(args):
 
 
 def build_source_separated(args):
-    check_save_path(args.save_path)
+    _check_save_path(args.save_path)
     assert os.path.isdir(
         args.load_dir
     ), f"Load directory {args.load_dir} does not exist"
@@ -170,24 +204,73 @@ def build_source_separated(args):
     print(f"Validation dataset built and saved to {val_save_path}")
 
 
+def _get_model(checkpoint_path, model_config="small"):
+    model_config = ModelConfig(**load_model_config(model_config))
+    model = MelSpectrogramCNN(model_config)
+
+    with safe_open(checkpoint_path, framework="pt", device="cpu") as f:
+        state_dict = {key[10:]: f.get_tensor(key) for key in f.keys()}
+
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    return model
+
+
+def process_mp3_files(args):
+    _check_save_path(args.save_path)
+    assert os.path.isdir(
+        args.load_dir
+    ), f"Load directory {args.load_dir} does not exist"
+    assert os.path.isfile(
+        args.checkpoint_path
+    ), f"Checkpoint file {args.checkpoint_path} does not exist"
+
+    # Find all MP3 files in the directory
+    audio_files = glob.glob(
+        os.path.join(args.load_dir, "**/*.mp3"), recursive=True
+    )
+    if not audio_files:
+        print(f"No .mp3 files found in {args.load_dir}")
+        return
+
+    print(f"Found {len(audio_files)} MP3 files")
+
+    model = _get_model(args.checkpoint_path, args.model_config)
+    results = process_files(audio_files, model)
+
+    with open(args.save_path, "w") as f:
+        json.dump(results, f, indent=2)
+
+    print(f"Results saved to {args.save_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Build training datasets")
     subparsers = parser.add_subparsers(help="sub-command help", dest="command")
     parser_supervised = subparsers.add_parser(
-        "supervised", help="Build from supervised dataset"
+        "build-supervised-dataset", help="Build from supervised dataset"
     )
     parser_source_separated = subparsers.add_parser(
-        "source-separated", help="Build from source-separated dataset"
+        "build-source-separated-dataset",
+        help="Build from source-separated dataset",
+    )
+    parser_process_files = subparsers.add_parser(
+        "process-files", help="Process MP3 files in a directory"
     )
     _add_supervised_args(parser_supervised)
     _add_source_separated_args(parser_source_separated)
+    _add_process_files_args(parser_process_files)
+
     args = parser.parse_args()
 
     try:
-        if args.command == "supervised":
+        if args.command == "build-supervised-dataset":
             build_supervised(args)
-        elif args.command == "source-separated":
+        elif args.command == "build-source-separated-dataset":
             build_source_separated(args)
+        elif args.command == "process-files":
+            process_mp3_files(args)
         else:
             parser.print_help()
             print("Unrecognized command")

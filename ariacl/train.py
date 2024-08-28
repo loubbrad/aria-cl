@@ -123,7 +123,7 @@ def _get_optim(
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=lr,
-        weight_decay=0.1,
+        weight_decay=0.01,
         betas=(0.9, 0.95),
         eps=1e-6,
     )
@@ -176,16 +176,26 @@ def get_dataloaders(
     num_workers: int,
 ):
     logger = get_logger(__name__)
+    audio_transform = AudioTransform()
     train_dataset = TrainingDataset(load_paths=train_data_paths)
     val_dataset = TrainingDataset(load_paths=val_data_path)
     logger.info(
         f"Loaded datasets with length: train={len(train_dataset)}; val={len(val_dataset)}"
     )
 
+    def _collate_fn(seqs):
+        wav, tgt = torch.utils.data.default_collate(seqs)
+
+        # Distortion
+        wav = audio_transform.distortion_aug_cpu(wav)
+
+        return wav, tgt
+
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         num_workers=num_workers,
+        collate_fn=_collate_fn,
         shuffle=True,
     )
     val_dataloader = DataLoader(
@@ -257,7 +267,7 @@ def _train(
                 wav, tgt = batch
 
                 with torch.no_grad():
-                    mel = audio_transform.log_mel(wav)
+                    mel = audio_transform.forward(wav)
                     mel = mel.unsqueeze(1)
 
                 logits = model(mel)  # (b_sz, 1)

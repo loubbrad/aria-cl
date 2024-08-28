@@ -1,6 +1,5 @@
 import os
 import random
-import numpy as np
 import torch
 import torchaudio
 import torchaudio.functional as F
@@ -217,9 +216,6 @@ class AudioTransform(torch.nn.Module):
         noise_paths = self._get_paths(
             os.path.join(os.path.dirname(__file__), "assets", "noise")
         )
-        applause_paths = self._get_paths(
-            os.path.join(os.path.dirname(__file__), "assets", "applause")
-        )
 
         # Register impulses and noises as buffers
         self.num_impulse = 0
@@ -232,11 +228,6 @@ class AudioTransform(torch.nn.Module):
             self.register_buffer(f"noise_{i}", noise)
             self.num_noise += 1
 
-        self.num_applause = 0
-        for i, applause in enumerate(self._get_noise(applause_paths)):
-            self.register_buffer(f"applause_{i}", applause)
-            self.num_applause += 1
-
         self.spec_transform = torchaudio.transforms.Spectrogram(
             n_fft=self.n_fft,
             hop_length=self.hop_len,
@@ -245,8 +236,8 @@ class AudioTransform(torch.nn.Module):
             n_mels=self.n_mels,
             sample_rate=self.sample_rate,
             n_stft=self.n_fft // 2 + 1,
-            f_min=30,
-            f_max=8000,
+            f_min=20,
+            f_max=self.sample_rate // 2,
         )
 
     def get_params(self):
@@ -277,7 +268,7 @@ class AudioTransform(torch.nn.Module):
         impulses = [
             F.resample(
                 waveform=wav, orig_freq=sr, new_freq=self.sample_rate
-            ).mean(0, keepdim=True)[:, : 5 * self.sample_rate]
+            ).mean(0, keepdim=True)[:, : self.samples_per_chunk]
             for wav, sr in impulses
         ]
         return [
@@ -390,8 +381,8 @@ class AudioTransform(torch.nn.Module):
         # also that shifting is done to the spectrogram in log_mel, not the wav.
 
         # Noise
-        # if random.random() < self.noise_ratio:
-        #     wav = self.apply_noise(wav)
+        if random.random() < self.noise_ratio:
+            wav = self.apply_noise(wav)
 
         # Reverb
         if random.random() < self.reverb_ratio:
@@ -413,10 +404,10 @@ class AudioTransform(torch.nn.Module):
 
         return log_spec
 
-    def log_mel(self, wav: torch.Tensor):
+    def log_mel(self, wav: torch.Tensor, shift: bool = False):
         spec = self.spec_transform(wav)[..., :-1]
 
-        if random.random() < self.pitch_shift_ratio:
+        if random.random() < self.pitch_shift_ratio and shift == True:
             pitch_shift_st = random.uniform(
                 -self.max_pitch_shift, self.max_pitch_shift
             )
@@ -435,6 +426,6 @@ class AudioTransform(torch.nn.Module):
         wav = self.aug_wav(wav)
 
         # Spec, pitch shift
-        log_mel = self.log_mel(wav)
+        log_mel = self.log_mel(wav, shift=True)
 
         return log_mel

@@ -155,6 +155,14 @@ def _get_source_separated_batches_and_intervals(
     )
 
 
+# Some good parameters for non-piano detection
+# GiantMIDI (Not 100% sure): -25dB, W=1.5
+# Noisy piano: -20dB, W=1.5
+# Piano concerto: -30dB, W=1.0
+# Score-4: -22dB, W=1.0
+# Jazz trio (??): -30dB, W=1.0
+
+
 # TODO: Fix deadlock issue from using multiple workers
 def source_separated_worker(
     load_path_queue: Queue, save_file_lock, save_path: str, device="cuda"
@@ -291,7 +299,8 @@ class TrainingDataset(torch.utils.data.Dataset):
         mmap_obj.seek(pos)
 
         wav = torch.load(
-            io.BytesIO(base64.b64decode(mmap_obj.readline())), weights_only=True
+            io.BytesIO(base64.b64decode(mmap_obj.readline())),
+            weights_only=True,
         )
         label = orjson.loads(base64.b64decode(mmap_obj.readline()))
 
