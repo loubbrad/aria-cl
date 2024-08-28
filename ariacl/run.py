@@ -218,7 +218,6 @@ def _get_model(checkpoint_path, model_config="small"):
 
 
 def process_mp3_files(args):
-    _check_save_path(args.save_path)
     assert os.path.isdir(
         args.load_dir
     ), f"Load directory {args.load_dir} does not exist"
