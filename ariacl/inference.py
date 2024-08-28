@@ -1,6 +1,7 @@
 import os
 import torch
-import gc
+import torch._dynamo.config
+import torch._inductor.config
 
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Tuple, Iterator
@@ -9,6 +10,10 @@ from functools import wraps
 from ariacl.model import MelSpectrogramCNN
 from ariacl.audio import get_wav_segments_b, AudioTransform
 from ariacl.config import load_config
+
+torch._inductor.config.coordinate_descent_tuning = True
+torch._inductor.config.triton.unique_kernel_names = True
+torch._inductor.config.fx_graph_cache = True
 
 
 def optional_bf16_autocast(func):
@@ -30,9 +35,10 @@ def compiled_forward(model: MelSpectrogramCNN, mel_specs: torch.Tensor):
 
 
 @optional_bf16_autocast
-@torch.no_grad()
 def get_scores_from_batch(mel_specs: torch.Tensor, model: MelSpectrogramCNN):
-    scores = torch.nn.functional.sigmoid(model.forward(mel_specs.unsqueeze(1)))
+    scores = torch.nn.functional.sigmoid(
+        compiled_forward(model, mel_specs.unsqueeze(1))
+    )
     scores = torch.nn.functional.conv1d(
         scores.view(1, 1, -1),
         torch.ones(1, 1, 5).cuda() / 5,
@@ -45,7 +51,6 @@ def get_scores_from_batch(mel_specs: torch.Tensor, model: MelSpectrogramCNN):
 
 
 # TODO: Tune exact times for start and end of segment
-@torch.no_grad()
 def get_segments_from_audio(
     model: MelSpectrogramCNN,
     audio_transform: AudioTransform,
@@ -138,7 +143,7 @@ def load_audio(audio_path: str) -> Tuple[torch.Tensor, str]:
 
 
 def parallel_audio_segments_generator(
-    audio_paths: List[str], workers: int = 5
+    audio_paths: List[str], workers: int = 2
 ) -> Iterator[Tuple[torch.Tensor, str]]:
     with ThreadPoolExecutor(max_workers=workers) as executor:
         for result in executor.map(load_audio, audio_paths):
@@ -151,31 +156,32 @@ def process_files(audio_paths: List[str], model: MelSpectrogramCNN):
         assert os.path.isfile(_path), f"File {_path} not found"
 
     config = load_config()
-    model.eval().cuda()
+    model.cuda()
     audio_transform = AudioTransform().cuda()
 
-    global compiled_forward
-    compiled_forward = torch.compile(
-        compiled_forward,
-        mode="reduce-overhead",
-        fullgraph=True,
-    )
+    # global compiled_forward
+    # compiled_forward = torch.compile(
+    #     compiled_forward,
+    #     mode="reduce-overhead",
+    #     fullgraph=True,
+    # )
 
     results_by_path = {}
     num_processed = 0
     for wav_segments, _audio_path in parallel_audio_segments_generator(
         audio_paths=audio_paths,
     ):
-        segments = get_segments_from_audio(
-            wav_segments=wav_segments,
-            model=model,
-            audio_transform=audio_transform,
-            config=config,
-        )
+        with torch.no_grad():
+            segments = get_segments_from_audio(
+                wav_segments=wav_segments,
+                model=model,
+                audio_transform=audio_transform,
+                config=config,
+            )
         results_by_path[_audio_path] = segments
         num_processed += 1
 
-        if num_processed % 25 == 0:
+        if num_processed % 5 == 0:
             print(f"Finished {num_processed}/{len(audio_paths)} files.")
 
     return results_by_path

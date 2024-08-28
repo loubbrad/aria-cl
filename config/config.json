@@ -30,7 +30,7 @@
         "stride_factor": 2
     },
     "inference": {
-        "batch_size": 512,
+        "batch_size": 256,
         "threshold_score": 0.5,
         "min_avg_score": 0.5,
         "min_valid_window_s": 45,

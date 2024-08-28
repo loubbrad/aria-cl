@@ -275,17 +275,7 @@ class TrainingDataset(torch.utils.data.Dataset):
             mmap_obj = mmap.mmap(buff.fileno(), 0, access=mmap.ACCESS_READ)
             self.file_mmaps.append(mmap_obj)
 
-            index_path = TrainingDataset._get_index_path(load_path=path)
-            if os.path.isfile(index_path):
-                _index = self._load_index(load_path=index_path)
-            else:
-                print("Calculating index...")
-                _index = self._build_index(mmap_obj)
-                print(
-                    f"Index of length {len(_index)} calculated, saving to {index_path}"
-                )
-                self._save_index(index=_index, save_path=index_path)
-
+            _index = self._build_index(mmap_obj)
             self.index.extend(
                 [(len(self.file_mmaps) - 1, pos) for pos in _index]
             )
@@ -315,42 +305,13 @@ class TrainingDataset(torch.utils.data.Dataset):
     def __del__(self):
         self.close()
 
-    def _save_index(self, index: list, save_path: str):
-        with open(save_path, "w") as file:
-            for idx in index:
-                file.write(f"{idx}\n")
-
-    def _load_index(self, load_path: str):
-        with open(load_path, "r") as file:
-            return [int(line.strip()) for line in file]
-
-    @staticmethod
-    def _get_index_path(load_path: str) -> str:
-        parts = load_path.rsplit(".", 1)
-        if len(parts) == 1:
-            return f"{load_path}_index"
-        else:
-            base, ext = parts
-            return f"{base}_index.{ext}"
-
     def _build_index(self, mmap_obj):
         mmap_obj.seek(0)
-        index = []
-        pos = 0
-        while True:
-            pos_buff = pos
+        pos = mmap_obj.find(b"\n", 0)
+        pos = mmap_obj.find(b"\n", pos + 1)
+        audio_bytes_len = pos + 1
 
-            pos = mmap_obj.find(b"\n", pos)
-            if pos == -1:
-                break
-            pos = mmap_obj.find(b"\n", pos + 1)
-            if pos == -1:
-                break
-
-            index.append(pos_buff)
-            pos += 1
-
-        return index
+        return list(range(0, len(mmap_obj), audio_bytes_len))
 
     @classmethod
     def build_supervised(
@@ -365,11 +326,6 @@ class TrainingDataset(torch.utils.data.Dataset):
         assert (
             len(save_path.rsplit(".", 1)) == 2
         ), "path is missing a file extension"
-
-        index_path = TrainingDataset._get_index_path(load_path=save_path)
-        if os.path.isfile(index_path):
-            print(f"Removing existing index file at {index_path}")
-            os.remove(index_path)
 
         load_path_queue = Queue()
         for entry in load_paths:
@@ -388,7 +344,6 @@ class TrainingDataset(torch.utils.data.Dataset):
         for p in processes:
             p.join()
 
-        # Implicitly creates index
         return TrainingDataset(load_paths=save_path)
 
     @classmethod
@@ -402,11 +357,6 @@ class TrainingDataset(torch.utils.data.Dataset):
         assert (
             len(save_path.rsplit(".", 1)) == 2
         ), "path is missing a file extension"
-
-        index_path = TrainingDataset._get_index_path(load_path=save_path)
-        if os.path.isfile(index_path):
-            print(f"Removing existing index file at {index_path}")
-            os.remove(index_path)
 
         load_path_queue = Queue()
         for entry in load_paths:
@@ -425,5 +375,4 @@ class TrainingDataset(torch.utils.data.Dataset):
         for p in processes:
             p.join()
 
-        # Implicitly creates index
         return TrainingDataset(load_paths=save_path)
