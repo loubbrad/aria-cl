@@ -187,3 +187,4 @@ tests/test_results/*
 ariacl/assets/*
 *.DS_Store
 .vscode/
+tests/

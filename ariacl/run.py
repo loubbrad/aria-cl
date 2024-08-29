@@ -4,11 +4,8 @@ import glob
 import json
 
 from typing import List
-from safetensors import safe_open
 
 from ariacl.data import TrainingDataset
-from ariacl.config import load_model_config
-from ariacl.model import MelSpectrogramCNN, ModelConfig
 from ariacl.inference import process_files
 
 
