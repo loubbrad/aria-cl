@@ -4,6 +4,7 @@ import torch
 import torchaudio
 import torchaudio.functional as F
 
+from torchaudio.io import StreamReader
 from typing import Union, Callable, Optional
 
 from ariacl.config import load_config
@@ -51,6 +52,55 @@ def get_wav_segments(
             yield buffer
 
 
+@torch.inference_mode()
+def get_wav_segments_b_stream(
+    audio_path: str,
+    stride_factor: int,
+    batch_size: int,
+    device: str = "cuda",
+):
+    # NOTE: Due to resampling algorithm differences, these wavs differ slightly
+    # from get_wav_segments_b
+
+    assert os.path.isfile(audio_path), "Audio file not found"
+    config = load_config()
+    sample_rate = config["audio"]["sample_rate"]
+    chunk_len = config["audio"]["chunk_len"]
+    chunk_samples = int(sample_rate * chunk_len)
+    stride_samples = int(chunk_samples // stride_factor)
+    assert chunk_samples % stride_samples == 0, "Invalid stride"
+
+    frames_per_chunk = chunk_samples  # Samples for initial chunk
+    frames_per_chunk += (batch_size - 1) * stride_samples  # Samples for batch
+    frames_per_chunk -= chunk_samples - stride_samples  # Remove due to buffer
+
+    audio_stream = StreamReader(audio_path)
+    audio_stream.add_basic_audio_stream(
+        frames_per_chunk=frames_per_chunk,
+        sample_rate=sample_rate,
+    )
+
+    # Create buffer
+    initial_chunk = next(audio_stream.stream())[0].to(device).mean(1)
+    buffer = initial_chunk[: chunk_samples - stride_samples]
+    audio_stream.seek((chunk_samples - stride_samples) // sample_rate)
+
+    for segment in audio_stream.stream():
+        segment = segment[0].to(device)
+        segment = segment.mean(1)
+
+        segment = torch.cat([buffer, segment])
+
+        # Check for stride_factor == 1 due to [-0:] slice
+        if chunk_samples - stride_samples > 0:
+            buffer = segment[-(chunk_samples - stride_samples) :]
+
+        if segment.shape[0] < chunk_samples:
+            continue
+
+        yield segment.unfold(0, chunk_samples, stride_samples).to(torch.float16)
+
+
 @torch.no_grad()
 def get_wav_segments_b(
     audio_path: str,
@@ -66,17 +116,15 @@ def get_wav_segments_b(
     assert chunk_samples % stride_samples == 0, "Invalid stride"
 
     wav, orig_sample_rate = torchaudio.load(audio_path)
+    wav = wav.to(device)
+    if wav.shape[0] > 1:
+        wav = wav.mean(dim=0, keepdim=True)
     if orig_sample_rate != sample_rate:
         wav = torchaudio.functional.resample(
             waveform=wav, orig_freq=orig_sample_rate, new_freq=sample_rate
-        ).to(device)
-    else:
-        wav = wav.to(device)
+        )
 
-    if wav.shape[0] > 1:
-        wav = wav.mean(dim=0)
-    else:
-        wav = wav.squeeze(0)
+    wav = wav.squeeze(0)
 
     return wav.unfold(0, chunk_samples, stride_samples)
 
@@ -184,6 +232,18 @@ def get_audio_intervals(
         batch_intervals.append(intervals)
 
     return batch_intervals
+
+
+@torch.jit.script
+def norm_mel(mel_spec: torch.Tensor):
+    # This norm formula is taken from Whisper
+    log_spec = torch.clamp(mel_spec, min=1e-10).log10()
+    max_over_mels = log_spec.max(dim=1, keepdim=True)[0]
+    max_log_spec = max_over_mels.max(dim=2, keepdim=True)[0]
+    log_spec = torch.maximum(log_spec, max_log_spec - 8.0)
+    log_spec = (log_spec + 4.0) / 4.0
+
+    return log_spec
 
 
 class AudioTransform(torch.nn.Module):
@@ -394,20 +454,10 @@ class AudioTransform(torch.nn.Module):
 
         return wav
 
-    def norm_mel(self, mel_spec: torch.Tensor):
-        # This norm formula is taken from Whisper
-        log_spec = torch.clamp(mel_spec, min=1e-10).log10()
-        max_over_mels = log_spec.max(dim=1, keepdim=True)[0]
-        max_log_spec = max_over_mels.max(dim=2, keepdim=True)[0]
-        log_spec = torch.maximum(log_spec, max_log_spec - 8.0)
-        log_spec = (log_spec + 4.0) / 4.0
-
-        return log_spec
-
     def log_mel(self, wav: torch.Tensor, shift: bool = False):
         spec = self.spec_transform(wav)[..., :-1]
 
-        if random.random() < self.pitch_shift_ratio and shift == True:
+        if shift == True and random.random() < self.pitch_shift_ratio:
             pitch_shift_st = random.uniform(
                 -self.max_pitch_shift, self.max_pitch_shift
             )
@@ -417,7 +467,7 @@ class AudioTransform(torch.nn.Module):
             )
 
         mel_spec = self.mel_transform(spec)
-        log_mel = self.norm_mel(mel_spec)
+        log_mel = norm_mel(mel_spec)
 
         return log_mel
 

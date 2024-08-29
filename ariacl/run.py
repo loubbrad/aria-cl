@@ -204,19 +204,6 @@ def build_source_separated(args):
     print(f"Validation dataset built and saved to {val_save_path}")
 
 
-def _get_model(checkpoint_path, model_config="small"):
-    model_config = ModelConfig(**load_model_config(model_config))
-    model = MelSpectrogramCNN(model_config)
-
-    with safe_open(checkpoint_path, framework="pt", device="cpu") as f:
-        state_dict = {key[10:]: f.get_tensor(key) for key in f.keys()}
-
-    model.load_state_dict(state_dict)
-    model.eval()
-
-    return model
-
-
 def process_mp3_files(args):
     assert os.path.isdir(
         args.load_dir
@@ -224,6 +211,9 @@ def process_mp3_files(args):
     assert os.path.isfile(
         args.checkpoint_path
     ), f"Checkpoint file {args.checkpoint_path} does not exist"
+    assert (
+        os.path.isfile(args.save_path) is False
+    ), f"File already exists at save location {args.save_path}"
 
     # Find all MP3 files in the directory
     audio_files = glob.glob(
@@ -235,8 +225,7 @@ def process_mp3_files(args):
 
     print(f"Found {len(audio_files)} MP3 files")
 
-    model = _get_model(args.checkpoint_path, args.model_config)
-    results = process_files(audio_files, model)
+    results = process_files(audio_files, checkpoint_path=args.checkpoint_path)
 
     with open(args.save_path, "w") as f:
         json.dump(results, f, indent=2)
