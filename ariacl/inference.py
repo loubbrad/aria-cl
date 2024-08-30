@@ -165,7 +165,7 @@ def gpu_worker(gpu_task_queue, gpu_result_queue, checkpoint_path):
 
     while True:
         try:
-            batch, pid = gpu_task_queue.get()
+            batch, pid = gpu_task_queue.get(timeout=30)
         except Empty:
             break
 
