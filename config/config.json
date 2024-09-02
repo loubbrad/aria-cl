@@ -30,9 +30,9 @@
         "stride_factor": 2
     },
     "inference": {
-        "batch_size": 256,
-        "threshold_score": 0.5,
-        "min_avg_score": 0.7,
+        "batch_size": 128,
+        "threshold_score": 0.7,
+        "min_avg_score": 0.6,
         "min_valid_window_s": 45,
         "min_invalid_window_s": 5
     }

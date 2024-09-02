@@ -5,6 +5,7 @@ import torch._dynamo.config
 import torch._inductor.config
 
 from typing import List
+from tqdm import tqdm
 from functools import wraps
 from safetensors import safe_open
 from queue import Empty
@@ -41,22 +42,24 @@ def get_scores_from_batch(mel_specs: torch.Tensor, model: MelSpectrogramCNN):
     scores = torch.nn.functional.sigmoid(
         compiled_forward(model, mel_specs.unsqueeze(1))
     )
+
     scores = torch.nn.functional.conv1d(
         scores.view(1, 1, -1),
-        torch.ones(1, 1, 5).cuda() / 5,
+        torch.ones(1, 1, 3).cuda() / 3,  # Changed from 5 to 3
         padding="same",
     ).view(-1)
-    scores[0] *= 3 / 2
-    scores[-1] *= 3 / 2
+    scores[0] *= 3 / 2  # Changed from 3/2 to 2
+    scores[-1] *= 3 / 2  # Changed from 3/2 to 2
 
     return scores
 
 
 def get_segments_from_audio(
     audio_path: str,
-    gpu_task_queue,
-    gpu_result_queue,
     config: dict,
+    gpu_task_queue=None,
+    gpu_result_queue=None,
+    model: MelSpectrogramCNN | None = None,
 ):
     scores = torch.tensor([], device="cpu")
     batched_wav_segments_itt = get_wav_segments_b_stream(
@@ -67,9 +70,16 @@ def get_segments_from_audio(
     )
 
     for batch in batched_wav_segments_itt:
-        _scores = get_scores_from_gpu_worker(
-            batch, gpu_task_queue, gpu_result_queue
-        )
+        if model:
+            _scores = get_scores_from_gpu_model(batch=batch, model=model)
+        elif gpu_task_queue and gpu_result_queue is not None:
+            _scores = get_scores_from_gpu_worker(
+                batch=batch,
+                gpu_task_queue=gpu_task_queue,
+                gpu_result_queue=gpu_result_queue,
+            )
+        else:
+            raise ValueError("Must either provide gpu queues or model.")
 
         scores = torch.cat(
             (
@@ -81,7 +91,7 @@ def get_segments_from_audio(
 
     avg_score = scores.mean().item()
     if avg_score < config["inference"]["min_avg_score"]:
-        return []
+        return [], avg_score
 
     padded = torch.cat(
         [
@@ -97,8 +107,17 @@ def get_segments_from_audio(
     non_piano_segment_lengths = (
         non_piano_segment_ends - non_piano_segment_starts
     )
-    non_piano_segments_valid = (
-        non_piano_segment_lengths >= config["inference"]["min_invalid_window_s"]
+    non_piano_segments_valid = torch.tensor(
+        [
+            (length >= config["inference"]["min_invalid_window_s"])
+            or (start == 0)
+            or (end == len(scores))  # Segment includes the end
+            for start, end, length in zip(
+                non_piano_segment_starts.tolist(),
+                non_piano_segment_ends.tolist(),
+                non_piano_segment_lengths.tolist(),
+            )
+        ]
     )
 
     piano_segments = []
@@ -113,9 +132,9 @@ def get_segments_from_audio(
                 non_piano_start - segment_start_buffer
                 >= config["inference"]["min_valid_window_s"]
             ):
-                # Add three second buffer to end of segment
+                # Add buffer to end of segment
                 piano_segments.append(
-                    (segment_start_buffer, non_piano_start + 2)
+                    (segment_start_buffer, non_piano_start + 4)
                 )
 
             segment_start_buffer = non_piano_end
@@ -124,9 +143,20 @@ def get_segments_from_audio(
         len(scores) - segment_start_buffer
         >= config["inference"]["min_valid_window_s"]
     ):
-        piano_segments.append((segment_start_buffer, len(scores)))
+        piano_segments.append((segment_start_buffer, len(scores) + 4))
 
-    return piano_segments
+    return piano_segments, avg_score
+
+
+def get_scores_from_gpu_model(batch: torch.Tensor, model: MelSpectrogramCNN):
+    audio_transform = AudioTransform().cuda()
+
+    batch = batch.cuda()
+    with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+        mel_specs = audio_transform.log_mel(batch).to(torch.bfloat16)
+        scores = get_scores_from_batch(mel_specs=mel_specs, model=model).cpu()
+
+    return scores
 
 
 def get_scores_from_gpu_worker(batch, gpu_task_queue, gpu_result_queue):
@@ -194,16 +224,21 @@ def worker(audio_path_queue, gpu_task_queue, gpu_result_queue, segment_queue):
             break
 
         try:
-            segments = get_segments_from_audio(
-                path, gpu_task_queue, gpu_result_queue, config
+            segments, avg_score = get_segments_from_audio(
+                audio_path=path,
+                config=config,
+                gpu_task_queue=gpu_task_queue,
+                gpu_result_queue=gpu_result_queue,
             )
         except Exception as e:
             print(f"Failed to process {path}: {e}")
         else:
-            segment_queue.put({"path": path, "segments": segments})
+            segment_queue.put(
+                {"path": path, "segments": segments, "avg_score": avg_score}
+            )
 
 
-# This is a really REALLY dumb way of doing this, but the bottleneck seems to
+# This is a REALLY dumb way of doing this, but the bottleneck seems to
 # be loading the batches (cpu), so...
 def process_files(audio_paths: List[str], checkpoint_path: str):
     assert torch.cuda.is_available(), "CUDA device not found"
@@ -242,21 +277,21 @@ def process_files(audio_paths: List[str], checkpoint_path: str):
         cpu_processes.append(p)
 
     segments_by_path = {}
-    num_processed = 0
-    while len(segments_by_path) < len(audio_paths):
-        try:
-            result = segment_queue.get(timeout=0.1)
-            num_processed += 1
-            segments_by_path[result["path"]] = result["segments"]
-            print(f"Finished processing: {result['path']}")
-            if num_processed % 50 == 0:
-                print(f"Finished processing: {num_processed}")
-
-        except Empty:
-            if all(not p.is_alive() for p in cpu_processes):
-                break
-            else:
-                continue
+    with tqdm(total=len(audio_paths), desc="Processing audio files") as pbar:
+        while len(segments_by_path) < len(audio_paths):
+            try:
+                result = segment_queue.get(timeout=0.1)
+                segments_by_path[result["path"]] = {
+                    "segments": result["segments"],
+                    "avg_score": result["avg_score"],
+                }
+                pbar.update(1)
+                pbar.set_postfix({"Current file": result["path"]})
+            except Empty:
+                if all(not p.is_alive() for p in cpu_processes):
+                    break
+                else:
+                    continue
 
     for p in cpu_processes:
         p.join()
