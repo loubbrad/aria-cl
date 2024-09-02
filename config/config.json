@@ -23,7 +23,7 @@
             "frame_len": 2048,
             "hop_len": 512,
             "silence_threshold_db": -20,
-            "noise_threshold_db": -20,
+            "noise_threshold_db": -22,
             "min_window_silence_s": 4.0,
             "min_window_other_s": 1.0
         },
@@ -34,6 +34,6 @@
         "threshold_score": 0.7,
         "min_avg_score": 0.6,
         "min_valid_window_s": 45,
-        "min_invalid_window_s": 5
+        "min_invalid_window_s": 8
     }
 }
