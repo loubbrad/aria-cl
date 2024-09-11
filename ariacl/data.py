@@ -259,6 +259,7 @@ def source_separated_worker(
             )
 
 
+# TODO: Replace this mmap implementation with numpy memmap
 class TrainingDataset(torch.utils.data.Dataset):
     def __init__(self, load_paths: str | list):
         super().__init__()
@@ -288,11 +289,14 @@ class TrainingDataset(torch.utils.data.Dataset):
         mmap_obj = self.file_mmaps[file_id]
         mmap_obj.seek(pos)
 
+        # Hardcoded, perhaps remove?
         wav = torch.load(
-            io.BytesIO(base64.b64decode(mmap_obj.readline())),
+            io.BytesIO(base64.b64decode(mmap_obj[pos : pos + 589521 - 1])),
             weights_only=True,
         )
-        label = orjson.loads(base64.b64decode(mmap_obj.readline()))
+        label = orjson.loads(
+            base64.b64decode(mmap_obj[pos + 589521 : pos + 589521 + 5])
+        )
 
         return wav, torch.tensor(label, dtype=torch.float32)
 

@@ -336,18 +336,32 @@ class AudioTransform(torch.nn.Module):
         ]
 
     def _get_noise(self, noise_paths: list):
-        noises = [torchaudio.load(path) for path in noise_paths]
-        noises = [
+        raw_noises = [torchaudio.load(path) for path in noise_paths]
+        raw_noises = [
             F.resample(
                 waveform=wav, orig_freq=sr, new_freq=self.sample_rate
-            ).mean(0, keepdim=True)[:, : self.samples_per_chunk]
-            for wav, sr in noises
+            ).mean(0, keepdim=True)
+            for wav, sr in raw_noises
         ]
+
+        noises = []
+        for noise in raw_noises:
+            max_samples = noise.shape[1]
+            assert max_samples >= self.samples_per_chunk
+            for end_sample in range(
+                self.samples_per_chunk, max_samples, self.samples_per_chunk
+            ):
+                noises.append(
+                    noise[:, end_sample - self.samples_per_chunk : end_sample]
+                )
 
         for wav in noises:
             assert (
                 wav.shape[-1] == self.samples_per_chunk
             ), "noise wav too short"
+            assert (
+                torch.allclose(wav, torch.zeros_like(wav), atol=1e-6) is False
+            )
 
         return noises
 
@@ -434,7 +448,6 @@ class AudioTransform(torch.nn.Module):
 
         return shifted_specs
 
-    # TODO: Debug why noise is causing NaN loss
     def aug_wav(self, wav: torch.Tensor):
         # This function doesn't apply distortion. If distortion is desired it
         # should be run beforehand on the cpu with distortion_aug_cpu. Note
