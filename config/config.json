@@ -31,8 +31,8 @@
     },
     "inference": {
         "batch_size": 512,
-        "threshold_score": 0.6,
-        "min_avg_score": 0.5,
+        "threshold_score": 0.55,
+        "min_avg_segment_score": 0.7,
         "min_valid_window_s": 30,
         "min_invalid_window_s": 10
     }

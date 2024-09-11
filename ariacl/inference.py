@@ -55,6 +55,7 @@ def get_scores_from_batch(mel_specs: torch.Tensor, model: MelSpectrogramCNN):
     return scores.view(-1)
 
 
+# TODO: Add different config setting for non-piano segments, and avg segment-scores
 def get_segments_from_audio(
     audio_path: str,
     config: dict,
@@ -91,8 +92,8 @@ def get_segments_from_audio(
         )
 
     total_avg_score = scores.mean().item()
-    if total_avg_score < config["inference"]["min_avg_score"]:
-        return [], total_avg_score
+    # if total_avg_score < config["inference"]["min_avg_score"]:
+    #     return [], total_avg_score
 
     padded = torch.cat(
         [
@@ -139,7 +140,12 @@ def get_segments_from_audio(
                 )
                 _end = non_piano_start + 3
                 _segment_avg_score = torch.mean(scores[_start:_end]).item()
-                piano_segments.append((_start, _end, _segment_avg_score))
+
+                if (
+                    total_avg_score
+                    >= config["inference"]["min_avg_segment_score"]
+                ):
+                    piano_segments.append((_start, _end, _segment_avg_score))
 
             segment_start_buffer = non_piano_end
 
@@ -150,7 +156,8 @@ def get_segments_from_audio(
         _start = 0 if segment_start_buffer == 0 else segment_start_buffer + 2
         _end = len(scores) + 4
         _segment_avg_score = torch.mean(scores[_start:_end]).item()
-        piano_segments.append((_start, _end, _segment_avg_score))
+        if total_avg_score >= config["inference"]["min_avg_segment_score"]:
+            piano_segments.append((_start, _end, _segment_avg_score))
 
     return piano_segments, total_avg_score
 
