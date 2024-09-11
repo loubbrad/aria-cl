@@ -15,7 +15,7 @@ pip install -e .
 Download the preliminary model weights:
 
 ```
-wget https://storage.googleapis.com/aria-checkpoints/cl/small-0.1.safetensors
+wget https://storage.googleapis.com/aria-checkpoints/cl/large-0.1.safetensors
 ```
 
 ## Usage
