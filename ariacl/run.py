@@ -222,7 +222,11 @@ def process_mp3_files(args):
 
     print(f"Found {len(audio_files)} MP3 files")
 
-    results = process_files(audio_files, checkpoint_path=args.checkpoint_path)
+    results = process_files(
+        audio_files,
+        checkpoint_path=args.checkpoint_path,
+        save_path=args.save_path,
+    )
 
     with open(args.save_path, "w") as f:
         json.dump(results, f, indent=2)

@@ -7,9 +7,9 @@
         "n_mels": 256
     },
     "aug": {
-        "noise_ratio": 0.1,
-        "min_noise_snr": 20,
-        "max_noise_snr": 50,
+        "noise_ratio": 0.15,
+        "min_noise_snr": 15,
+        "max_noise_snr": 40,
         "reverb_ratio": 0.1,
         "bandpass_ratio": 0.1,
         "distortion_ratio": 0.02,
@@ -30,10 +30,10 @@
         "stride_factor": 2
     },
     "inference": {
-        "batch_size": 128,
-        "threshold_score": 0.7,
-        "min_avg_score": 0.6,
-        "min_valid_window_s": 45,
-        "min_invalid_window_s": 8
+        "batch_size": 512,
+        "threshold_score": 0.6,
+        "min_avg_score": 0.5,
+        "min_valid_window_s": 30,
+        "min_invalid_window_s": 10
     }
 }

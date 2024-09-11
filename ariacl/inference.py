@@ -1,4 +1,5 @@
 import os
+import json
 import torch
 import torch.multiprocessing as mp
 import torch._dynamo.config
@@ -19,7 +20,7 @@ torch._inductor.config.triton.unique_kernel_names = True
 torch._inductor.config.fx_graph_cache = True
 
 
-def _get_model(checkpoint_path, model_config="small"):
+def _get_model(checkpoint_path, model_config="large"):
     model_config = ModelConfig(**load_model_config(model_config))
     model = MelSpectrogramCNN(model_config)
 
@@ -43,15 +44,15 @@ def get_scores_from_batch(mel_specs: torch.Tensor, model: MelSpectrogramCNN):
         compiled_forward(model, mel_specs.unsqueeze(1))
     )
 
-    scores = torch.nn.functional.conv1d(
-        scores.view(1, 1, -1),
-        torch.ones(1, 1, 3).cuda() / 3,  # Changed from 5 to 3
-        padding="same",
-    ).view(-1)
-    scores[0] *= 3 / 2  # Changed from 3/2 to 2
-    scores[-1] *= 3 / 2  # Changed from 3/2 to 2
+    # scores = torch.nn.functional.conv1d(
+    #     scores.view(1, 1, -1),
+    #     torch.ones(1, 1, 3).cuda() / 3,  # Changed from 5 to 3
+    #     padding="same",
+    # ).view(-1)
+    # scores[0] *= 3 / 2  # Changed from 3/2 to 2
+    # scores[-1] *= 3 / 2  # Changed from 3/2 to 2
 
-    return scores
+    return scores.view(-1)
 
 
 def get_segments_from_audio(
@@ -89,9 +90,9 @@ def get_segments_from_audio(
             dim=0,
         )
 
-    avg_score = scores.mean().item()
-    if avg_score < config["inference"]["min_avg_score"]:
-        return [], avg_score
+    total_avg_score = scores.mean().item()
+    if total_avg_score < config["inference"]["min_avg_score"]:
+        return [], total_avg_score
 
     padded = torch.cat(
         [
@@ -133,9 +134,12 @@ def get_segments_from_audio(
                 >= config["inference"]["min_valid_window_s"]
             ):
                 # Add buffer to end of segment
-                piano_segments.append(
-                    (segment_start_buffer, non_piano_start + 4)
+                _start = (
+                    0 if segment_start_buffer == 0 else segment_start_buffer + 2
                 )
+                _end = non_piano_start + 3
+                _segment_avg_score = torch.mean(scores[_start:_end]).item()
+                piano_segments.append((_start, _end, _segment_avg_score))
 
             segment_start_buffer = non_piano_end
 
@@ -143,9 +147,12 @@ def get_segments_from_audio(
         len(scores) - segment_start_buffer
         >= config["inference"]["min_valid_window_s"]
     ):
-        piano_segments.append((segment_start_buffer, len(scores) + 4))
+        _start = 0 if segment_start_buffer == 0 else segment_start_buffer + 2
+        _end = len(scores) + 4
+        _segment_avg_score = torch.mean(scores[_start:_end]).item()
+        piano_segments.append((_start, _end, _segment_avg_score))
 
-    return piano_segments, avg_score
+    return piano_segments, total_avg_score
 
 
 def get_scores_from_gpu_model(batch: torch.Tensor, model: MelSpectrogramCNN):
@@ -218,9 +225,8 @@ def worker(audio_path_queue, gpu_task_queue, gpu_result_queue, segment_queue):
 
     while True:
         try:
-            path = audio_path_queue.get(timeout=10)
+            path = audio_path_queue.get(timeout=1)
         except Empty:
-            print("Finished!")
             break
 
         try:
@@ -240,13 +246,15 @@ def worker(audio_path_queue, gpu_task_queue, gpu_result_queue, segment_queue):
 
 # This is a REALLY dumb way of doing this, but the bottleneck seems to
 # be loading the batches (cpu), so...
-def process_files(audio_paths: List[str], checkpoint_path: str):
+def process_files(
+    audio_paths: List[str], checkpoint_path: str, save_path: str | None = None
+):
     assert torch.cuda.is_available(), "CUDA device not found"
     for _path in audio_paths:
         assert os.path.isfile(_path), f"File {_path} not found"
 
     mp.set_start_method("spawn", force=True)
-    num_cpu_workers = 16
+    num_cpu_workers = 8
 
     audio_path_queue = mp.Queue()
     gpu_task_queue = mp.Queue()
@@ -277,6 +285,7 @@ def process_files(audio_paths: List[str], checkpoint_path: str):
         cpu_processes.append(p)
 
     segments_by_path = {}
+    cnt = 0
     with tqdm(total=len(audio_paths), desc="Processing audio files") as pbar:
         while len(segments_by_path) < len(audio_paths):
             try:
@@ -287,6 +296,14 @@ def process_files(audio_paths: List[str], checkpoint_path: str):
                 }
                 pbar.update(1)
                 pbar.set_postfix({"Current file": result["path"]})
+                cnt += 1
+
+                if cnt % 50 == 0:
+                    if save_path is not None:
+                        print(f"Saving {cnt} results to {save_path}")
+                        with open(save_path, "w") as f:
+                            json.dump(segments_by_path, f, indent=2)
+
             except Empty:
                 if all(not p.is_alive() for p in cpu_processes):
                     break
@@ -296,6 +313,7 @@ def process_files(audio_paths: List[str], checkpoint_path: str):
     for p in cpu_processes:
         p.join()
 
+    gpu_process.terminate()
     gpu_process.join()
 
     return segments_by_path
