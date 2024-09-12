@@ -1,0 +1,8 @@
+{
+    "n_mels": 256,
+    "n_time": 500,
+    "n_conv_layers": 5,
+    "n_mlp_layers": 2,
+    "initial_channels": 8,
+    "mlp_hidden_size": 512
+}
