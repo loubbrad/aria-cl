@@ -24,6 +24,7 @@ After downloading the preliminary model weights, run inference with:
 
 ```bash
 python ariacl/run.py process-files \
+    --model_config large \
     --load_dir <dir-containing-audio-files> \
     --save_path <path-to-save-output-json> \
     --checkpoint_path <path-to-model-weights>
