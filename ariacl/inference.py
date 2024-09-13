@@ -305,7 +305,7 @@ def process_files(
                 pbar.set_postfix({"Current file": result["path"]})
                 cnt += 1
 
-                if cnt % 50 == 0:
+                if cnt % 500 == 0:
                     if save_path is not None:
                         print(f"Saving {cnt} results to {save_path}")
                         with open(save_path, "w") as f:
