@@ -159,7 +159,7 @@ def _get_source_separated_batches_and_intervals(
 # GiantMIDI (Not 100% sure): -25dB, W=1.5
 # Noisy piano: -20dB, W=1.5
 # Piano concerto: -30dB, W=1.0
-# Score-4: -22dB, W=1.0
+# Score-4: -22dB, W=1.0 - This must be wrong, reset this
 # Jazz trio (??): -30dB, W=1.0
 
 

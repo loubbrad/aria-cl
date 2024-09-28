@@ -55,7 +55,6 @@ def get_scores_from_batch(mel_specs: torch.Tensor, model: MelSpectrogramCNN):
     return scores.view(-1)
 
 
-# TODO: Add different config setting for non-piano segments, and avg segment-scores
 def get_segments_from_audio(
     audio_path: str,
     config: dict,
@@ -92,8 +91,6 @@ def get_segments_from_audio(
         )
 
     total_avg_score = scores.mean().item()
-    # if total_avg_score < config["inference"]["min_avg_score"]:
-    #     return [], total_avg_score
 
     padded = torch.cat(
         [
@@ -138,7 +135,7 @@ def get_segments_from_audio(
                 _start = (
                     0 if segment_start_buffer == 0 else segment_start_buffer + 2
                 )
-                _end = non_piano_start + 3
+                _end = non_piano_start + 2
                 _segment_avg_score = torch.mean(scores[_start:_end]).item()
 
                 if (
@@ -215,7 +212,6 @@ def gpu_worker(gpu_task_queue, gpu_result_queue, checkpoint_path):
 
         try:
             batch = batch.cuda()
-
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
                 mel_specs = audio_transform.log_mel(batch).to(torch.bfloat16)
                 scores = get_scores_from_batch(mel_specs=mel_specs, model=model)
@@ -261,7 +257,7 @@ def process_files(
         assert os.path.isfile(_path), f"File {_path} not found"
 
     mp.set_start_method("spawn", force=True)
-    num_cpu_workers = 8
+    num_cpu_workers = mp.cpu_count()
 
     audio_path_queue = mp.Queue()
     gpu_task_queue = mp.Queue()
