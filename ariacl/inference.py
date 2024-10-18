@@ -264,8 +264,17 @@ def process_files(
     gpu_result_queue = mp.Queue()
     segment_queue = mp.Queue()
 
+    if os.path.isfile(save_path):
+        with open(save_path, "r") as f:
+            segments_by_path = json.load(f)
+    else:
+        segments_by_path = {}
+
     for path in audio_paths:
-        audio_path_queue.put(path)
+        if segments_by_path.get(path, None) is not None:
+            audio_path_queue.put(path)
+
+    print(f"Total files to process: {audio_path_queue.qsize()}")
 
     gpu_process = mp.Process(
         target=gpu_worker,
@@ -287,8 +296,7 @@ def process_files(
         p.start()
         cpu_processes.append(p)
 
-    segments_by_path = {}
-    cnt = 0
+    cnt = len(segments_by_path.keys())
     with tqdm(total=len(audio_paths), desc="Processing audio files") as pbar:
         while len(segments_by_path) < len(audio_paths):
             try:

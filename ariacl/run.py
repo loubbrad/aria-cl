@@ -208,9 +208,8 @@ def process_mp3_files(args):
     assert os.path.isfile(
         args.checkpoint_path
     ), f"Checkpoint file {args.checkpoint_path} does not exist"
-    assert (
-        os.path.isfile(args.save_path) is False
-    ), f"File already exists at save location {args.save_path}"
+    if os.path.isfile(args.save_path) is False:
+        print(f"File already exists at save location {args.save_path}.")
 
     # Find all MP3 files in the directory
     audio_files = glob.glob(
