@@ -271,7 +271,7 @@ def process_files(
         segments_by_path = {}
 
     for path in audio_paths:
-        if segments_by_path.get(path, None) is not None:
+        if path not in segments_by_path:
             audio_path_queue.put(path)
 
     print(f"Total files to process: {audio_path_queue.qsize()}")
